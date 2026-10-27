@@ -110,23 +110,14 @@ ZoteroTray = {
         this.hideWindow(win);
       },
       onFocus: () => this.sendVisible(),
-      origHandleClose: null,
     };
+    // "close" is the window manager's close request (server-side decoration,
+    // Alt+F4, task bar). Zotero's own titlebar close button and Ctrl+W /
+    // File → Close on the last tab call window.close(), which only fires
+    // the cancelable "DOMWindowClose".
     win.addEventListener("close", state.onClose);
+    win.addEventListener("DOMWindowClose", state.onClose);
     win.addEventListener("activate", state.onFocus);
-    // Ctrl+W / File → Close on the last tab calls window.close() directly.
-    let pane = win.ZoteroPane;
-    if (pane && pane.handleClose) {
-      state.origHandleClose = pane.handleClose;
-      let tray = this;
-      pane.handleClose = function (event) {
-        if (win.Zotero_Tabs.numTabs <= 1 && tray.canHide(win)) {
-          tray.hideWindow(win);
-          return undefined;
-        }
-        return state.origHandleClose.call(this, event);
-      };
-    }
     this.windows.set(win, state);
     this.sendVisible();
   },
@@ -135,10 +126,8 @@ ZoteroTray = {
     let state = this.windows.get(win);
     if (!state) return;
     win.removeEventListener("close", state.onClose);
+    win.removeEventListener("DOMWindowClose", state.onClose);
     win.removeEventListener("activate", state.onFocus);
-    if (state.origHandleClose && win.ZoteroPane) {
-      win.ZoteroPane.handleClose = state.origHandleClose;
-    }
     this.windows.delete(win);
     this.sendVisible();
   },

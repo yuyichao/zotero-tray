@@ -6,8 +6,9 @@ X11 and Wayland:
 - A tray icon is shown for as long as Zotero is running. It uses the
   StatusNotifierItem protocol (`org.kde.StatusNotifierItem` plus a
   `com.canonical.dbusmenu` menu), not the XEmbed tray.
-- Closing the main window (title-bar close button, or Ctrl+W / File → Close
-  on the last tab) hides the window. The window is unmapped, so it is not in
+- Closing the main window (Zotero's own titlebar ✕, the window manager's
+  close button or Alt+F4, or Ctrl+W / File → Close on the last tab) hides the
+  window. The window is unmapped, so it is not in
   the task bar and the window manager has no window for it. Zotero keeps
   running.
 - Left-clicking the icon shows the window and focuses it, or hides it if it is
@@ -48,9 +49,11 @@ Zotero process                         tray helper (python3)            Plasma
 ```
 
 - `zotero-tray.js` (runs inside Zotero): hides and shows the main window
-  through `nsIBaseWindow.visibility`, so tabs and state are kept. It hooks the
-  window's `close` event and `ZoteroPane.handleClose`, and registers a
-  command-line handler (for relaunching `zotero`). It also wraps
+  through `nsIBaseWindow.visibility`, so tabs and state are kept. It cancels
+  the window's `close` event (window-manager close requests) and
+  `DOMWindowClose` (every `window.close()` call, which is what Zotero's own
+  titlebar button and Ctrl+W use). It also registers a command-line handler
+  (for relaunching `zotero`). It also wraps
   `Zotero.Utilities.Internal.activate` so code that brings Zotero to the front
   shows a hidden window first.
 - `helper/zotero-tray-helper.py` is started with `Subprocess` and exits when its
@@ -96,8 +99,8 @@ In a nested, headless KWin 6.8 (Wayland, plus Xwayland for the X11 backend)
 with a stand-in StatusNotifierWatcher, and Zotero 10.0.6 on both
 `MOZ_ENABLE_WAYLAND=1` and `GDK_BACKEND=x11`:
 
-- close button and `cmd_close` (Ctrl+W) hide the window; KWin and
-  `_NET_CLIENT_LIST` no longer list it
+- Zotero's titlebar ✕, `cmd_close` (Ctrl+W) and a window-manager close all
+  hide the window; KWin and `_NET_CLIENT_LIST` no longer list it
 - tray click shows and focuses the window even while another app is active,
   and hides it on a second click; the menu toggles and quits
 - relaunching `zotero` while hidden shows the window
@@ -106,8 +109,12 @@ with a stand-in StatusNotifierWatcher, and Zotero 10.0.6 on both
   described above
 - installing from the packed `.xpi`
 
-Not tested here: the real Plasma panel (menu rendering, a real mouse click with
-focus-stealing prevention active) and a native KWin X11 session.
+On a real Plasma 6.8 Wayland session: the tray icon and menu render, left
+click hides a focused window and shows and focuses it from another app (Plasma
+sends `ProvideXdgActivationToken` before `Activate`, and the KWin script does
+the activation), and the menu Show/Hide works.
+
+Not tested: a native KWin X11 session.
 
 ## Known limitations
 
