@@ -15,11 +15,14 @@
 #   {"event": "status", "ready": bool, ...}
 #   {"event": "activate"} | {"event": "show"} | {"event": "hide"}
 #   {"event": "quit"}
+# "activate" and "show" carry "token" when the tray host provided an
+# xdg-activation token for the click (ProvideXdgActivationToken).
 
 import json
 import os
 import sys
 import tempfile
+import time
 
 import gi
 
@@ -232,6 +235,8 @@ class Tray:
         self.last_status = None
         self.raise_timer = 0
         self.raise_file = None
+        self.token = None
+        self.token_time = 0
 
         node = Gio.DBusNodeInfo.new_for_xml(INTROSPECTION)
         for iface in node.interfaces:
@@ -255,7 +260,8 @@ class Tray:
     # --- status ---------------------------------------------------------
 
     def set_kwin(self, value):
-        self.kwin = value
+        # ZOTERO_TRAY_NO_KWIN=1 disables the KWin activation fallback.
+        self.kwin = value and not os.environ.get("ZOTERO_TRAY_NO_KWIN")
         self.report_status()
 
     def report_status(self):
@@ -469,11 +475,34 @@ class Tray:
         root = {"children-display": GLib.Variant("s", "submenu")}
         return (0, self.filter_props(root, names), children)
 
+    # Tokens are single use and short lived; only hand one out with the
+    # event that immediately follows it.
+    TOKEN_MAX_AGE = 5
+
+    def take_token(self):
+        token, self.token = self.token, None
+        if token and time.monotonic() - self.token_time < self.TOKEN_MAX_AGE:
+            return token
+        return None
+
+    def send_activation(self, event, source):
+        token = self.take_token()
+        log("%s from %s %s activation token" % (
+            event, source, "with" if token else "without"))
+        if token:
+            send(event=event, token=token)
+        else:
+            send(event=event)
+
     def on_menu_event(self, item_id, event_id):
         if event_id != "clicked":
             return
         if item_id == ITEM_TOGGLE:
-            send(event="hide" if self.window_visible else "show")
+            if self.window_visible:
+                self.take_token()
+                send(event="hide")
+            else:
+                self.send_activation("show", "menu")
         elif item_id == ITEM_QUIT:
             send(event="quit")
 
@@ -483,9 +512,12 @@ class Tray:
         ret = None
         if iface == "org.kde.StatusNotifierItem":
             if method == "Activate":
-                send(event="activate")
+                self.send_activation("activate", "Activate")
             elif method == "SecondaryActivate":
-                send(event="show")
+                self.send_activation("show", "SecondaryActivate")
+            elif method == "ProvideXdgActivationToken":
+                self.token = args[0]
+                self.token_time = time.monotonic()
         elif method == "GetLayout":
             ret = GLib.Variant("(u(ia{sv}av))",
                                (self.menu_revision, self.menu_layout(*args)))
@@ -541,7 +573,7 @@ class Tray:
                       Gio.DBusCallFlags.NONE, 5000, None, done, None)
 
     def raise_window(self, pid, caption):
-        if not self.kwin or os.environ.get("ZOTERO_TRAY_NO_KWIN"):
+        if not self.kwin:
             return
         name = "zotero-tray-raise-%d" % os.getpid()
         scripting = ("/Scripting", "org.kde.kwin.Scripting")

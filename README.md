@@ -18,8 +18,10 @@ X11 and Wayland:
   brings it back.
 
 No Zotero files are patched and nothing is preloaded. Only standard extension
-points are used: a bootstrapped Zotero plugin, and a KWin script that is loaded
-at runtime through KWin's scripting D-Bus API. No KWin settings need to change.
+points are used: a bootstrapped Zotero plugin, standard window activation
+(xdg-activation on Wayland, EWMH on X11), and, only as a fallback, a KWin script
+loaded at runtime through KWin's scripting D-Bus API. No KWin settings need to
+change.
 
 ## Requirements
 
@@ -44,7 +46,7 @@ Zotero process                         tray helper (python3)            Plasma
 ┌────────────────────────┐ JSON lines ┌──────────────────────────┐ D-Bus ┌──────────────────┐
 │ zotero-tray.js         │◄──stdout───│ org.kde.StatusNotifier-  │◄─────►│ system tray       │
 │  close → hide window   │───stdin───►│ Item + dbusmenu          │       │ (SNI host)        │
-│  show/raise/quit       │            │ KWin raise script loader │──────►│ KWin /Scripting   │
+│  show/activate/quit    │            │ KWin raise script loader │──────►│ KWin /Scripting   │
 └────────────────────────┘            └──────────────────────────┘       └──────────────────┘
 ```
 
@@ -60,11 +62,21 @@ Zotero process                         tray helper (python3)            Plasma
   stdin closes. The icon therefore disappears exactly when Zotero exits, even if
   Zotero crashes. The helper is extracted into the profile directory at
   startup.
-- After showing the window, the helper loads a one-shot KWin script that
-  activates the window (matched by pid and title). This avoids focus-stealing
-  prevention refusing focus, since the tray click went to plasmashell, not
-  Zotero. If KWin is not running, this step is skipped and only Gecko's own
-  `window.focus()` is used.
+- Activating the window: the click went to the tray, not to Zotero, so
+  Gecko's own focus request can be refused by focus-stealing prevention. After
+  the shown window has painted, the plugin activates it the way a task bar
+  would, in this order:
+  1. Wayland with a token: Plasma calls `ProvideXdgActivationToken` on the
+     item right before `Activate` and before a menu click. The helper passes
+     the token along, and the plugin hands it to GTK
+     (`gdk_wayland_display_set_startup_notification_id` + `gdk_window_focus`
+     on Gecko's toplevel, via js-ctypes), which calls
+     `xdg_activation_v1.activate`.
+  2. X11: an EWMH `_NET_ACTIVE_WINDOW` client message with the pager source
+     indication, sent for the window's XID.
+  3. Wayland without a token: a one-shot KWin script, loaded through KWin's
+     scripting D-Bus API, activates the window (matched by pid and title).
+  4. Otherwise Gecko's own `window.focus()`.
 
 ### Fail-safes
 
@@ -94,7 +106,7 @@ Set in the Config Editor (Settings → Advanced):
 | `extensions.zotero-tray.python` | `python3` | Interpreter for the helper (name looked up in `PATH`, or an absolute path). |
 
 Setting `ZOTERO_TRAY_NO_KWIN=1` in Zotero's environment turns off the KWin
-activation script (for debugging).
+activation fallback (for debugging).
 
 ## Tested
 
@@ -112,10 +124,13 @@ with a stand-in StatusNotifierWatcher, and Zotero 10.0.6 on both
   described above
 - installing from the packed `.xpi`
 
-On a real Plasma 6.8 Wayland session: the tray icon and menu render, left
-click hides a focused window and shows and focuses it from another app (Plasma
-sends `ProvideXdgActivationToken` before `Activate`, and the KWin script does
-the activation), and the menu Show/Hide works.
+On a real Plasma 6.8 Wayland session, with the KWin fallback turned off: the
+tray icon and menu render; Plasma provided an activation token for every left
+click and for the menu's Show item; using it, the window came forward with
+keyboard focus over another app, both when hidden and when visible behind
+another window; a left click on the focused window hides it. Middle click was
+not tried. EWMH activation on X11 was only tried under Xwayland in the nested
+KWin, where it brought the window forward with the KWin fallback off.
 
 Not tested: a native KWin X11 session.
 

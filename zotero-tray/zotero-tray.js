@@ -146,7 +146,8 @@ ZoteroTray = {
     this.sendVisible();
   },
 
-  showWindow(win = Zotero.getMainWindow()) {
+  // `token` is the xdg-activation token the tray host provided for the click.
+  showWindow(win = Zotero.getMainWindow(), token = null) {
     if (!win) {
       this.log("no main window, opening one");
       Zotero.openMainWindow();
@@ -163,15 +164,163 @@ ZoteroTray = {
       else if (state && state.x !== undefined && !this.isWayland()) {
         win.moveTo(state.x, state.y);
       }
+      // The window manager only knows the window again once it is mapped.
+      this.afterShown(win, () => this.activateWindow(win, token));
     }
-    else if (win.windowState == win.STATE_MINIMIZED) {
-      win.restore();
+    else {
+      if (win.windowState == win.STATE_MINIMIZED) {
+        win.restore();
+      }
+      this.activateWindow(win, token);
     }
-    win.focus();
-    // Without an activation token from the click, the compositor may refuse
-    // to focus the window; ask KWin directly when it is available.
-    this.send({ cmd: "raise", pid: Services.appinfo.processID, caption: win.document.title });
     this.sendVisible();
+  },
+
+  afterShown(win, callback) {
+    let done = false;
+    let run = () => {
+      if (done) return;
+      done = true;
+      callback();
+    };
+    win.requestAnimationFrame(() => win.requestAnimationFrame(run));
+    setTimeout(run, 500);
+  },
+
+  // --- Window activation -------------------------------------------------
+  //
+  // After a tray click the last user input went to the tray, not to Zotero,
+  // so Gecko's own focus request can be refused by focus-stealing prevention.
+  // Use the standard ways for a tray/task bar to activate a window instead:
+  //  - Wayland: the xdg-activation token the tray host provided for the
+  //    click, handed to GTK, which passes it to xdg_activation_v1.activate.
+  //  - X11: an EWMH _NET_ACTIVE_WINDOW request with the pager source
+  //    indication, as a task bar sends.
+  // Without a token on Wayland, ask KWin through a script when available,
+  // and use Gecko's own window.focus() otherwise.
+
+  activateWindow(win, token) {
+    let how = null;
+    try {
+      if (!this.isWayland()) {
+        this.ewmhActivate(win);
+        how = "EWMH _NET_ACTIVE_WINDOW";
+      }
+      else if (token) {
+        this.tokenActivate(win, token);
+        how = "xdg-activation token";
+      }
+    }
+    catch (e) {
+      Zotero.logError(e);
+    }
+    if (!how) {
+      win.focus();
+      if (this.kwin) {
+        this.send({ cmd: "raise", pid: Services.appinfo.processID, caption: win.document.title });
+        how = "KWin script";
+      }
+      else {
+        how = "window.focus()";
+      }
+    }
+    this.log("activating main window via " + how);
+  },
+
+  // Gecko's GTK toplevel GdkWindow for a chrome window.
+  gdkWindow(win) {
+    let lib = this.gdk();
+    let { ctypes } = lib;
+    // NS_NATIVE_WINDOW of the main widget, as "0x..."
+    let handle = this.baseWindow(win).nativeHandle;
+    let gdkWin = ctypes.voidptr_t(ctypes.UInt64(handle));
+    if (gdkWin.isNull()) {
+      throw new Error("no native window for the main window");
+    }
+    return lib.getToplevel(gdkWin);
+  },
+
+  gdk() {
+    if (!this._gdk) {
+      let { ctypes } = ChromeUtils.importESModule("resource://gre/modules/ctypes.sys.mjs");
+      let lib = ctypes.open("libgdk-3.so.0");
+      let ptr = ctypes.voidptr_t;
+      this._gdk = {
+        ctypes,
+        lib,
+        getDefaultDisplay: lib.declare("gdk_display_get_default", ctypes.default_abi, ptr),
+        getToplevel: lib.declare("gdk_window_get_toplevel", ctypes.default_abi, ptr, ptr),
+      };
+    }
+    return this._gdk;
+  },
+
+  tokenActivate(win, token) {
+    let g = this.gdk();
+    let { ctypes } = g;
+    if (!g.setStartupId) {
+      g.setStartupId = g.lib.declare("gdk_wayland_display_set_startup_notification_id",
+        ctypes.default_abi, ctypes.void_t, ctypes.voidptr_t, ctypes.char.ptr);
+      g.focus = g.lib.declare("gdk_window_focus",
+        ctypes.default_abi, ctypes.void_t, ctypes.voidptr_t, ctypes.uint32_t);
+    }
+    let gdkWin = this.gdkWindow(win);
+    // gdk_window_focus() consumes the display's startup notification ID as
+    // the activation token for xdg_activation_v1.activate.
+    g.setStartupId(g.getDefaultDisplay(), token);
+    g.focus(gdkWin, 0);
+  },
+
+  ewmhActivate(win) {
+    let g = this.gdk();
+    let { ctypes } = g;
+    if (!g.x11) {
+      let x11 = ctypes.open("libX11.so.6");
+      let ptr = ctypes.voidptr_t;
+      let XID = ctypes.unsigned_long;
+      g.x11 = {
+        lib: x11,
+        ClientMessageEvent: new ctypes.StructType("XClientMessageEvent", [
+          { type: ctypes.int },
+          { serial: ctypes.unsigned_long },
+          { send_event: ctypes.int },
+          { display: ptr },
+          { window: XID },
+          { message_type: XID },
+          { format: ctypes.int },
+          { data: ctypes.long.array(5) },
+          // XSendEvent copies a whole XEvent (24 longs).
+          { pad: ctypes.long.array(12) },
+        ]),
+        getXDisplay: g.lib.declare("gdk_x11_display_get_xdisplay", ctypes.default_abi, ptr, ptr),
+        getXid: g.lib.declare("gdk_x11_window_get_xid", ctypes.default_abi, XID, ptr),
+        getRoot: g.lib.declare("gdk_x11_get_default_root_xwindow", ctypes.default_abi, XID),
+        internAtom: x11.declare("XInternAtom", ctypes.default_abi, XID, ptr, ctypes.char.ptr, ctypes.int),
+        sendEvent: x11.declare("XSendEvent", ctypes.default_abi, ctypes.int,
+          ptr, XID, ctypes.int, ctypes.long, ptr),
+        flush: x11.declare("XFlush", ctypes.default_abi, ctypes.int, ptr),
+      };
+    }
+    let x = g.x11;
+    let gdkWin = this.gdkWindow(win);
+    let display = x.getXDisplay(g.getDefaultDisplay());
+    let event = new x.ClientMessageEvent();
+    event.type = 33; // ClientMessage
+    event.send_event = 1;
+    event.display = display;
+    event.window = x.getXid(gdkWin);
+    event.message_type = x.internAtom(display, "_NET_ACTIVE_WINDOW", 0);
+    event.format = 32;
+    event.data[0] = 2; // source indication: pager
+    // Timestamp: CurrentTime. (gdk_x11_get_server_time() would block forever
+    // since Gecko's toplevel does not select PropertyChange events.)
+    event.data[1] = 0;
+    event.data[2] = 0;
+    let mask = (1 << 20) | (1 << 19); // SubstructureRedirect | SubstructureNotify
+    if (!x.sendEvent(display, x.getRoot(), 0, mask, event.address())) {
+      throw new Error("XSendEvent failed");
+    }
+    x.flush(display);
   },
 
   showHiddenWindows() {
@@ -182,7 +331,7 @@ ZoteroTray = {
     }
   },
 
-  toggleWindow() {
+  toggleWindow(token) {
     let win = Zotero.getMainWindow();
     this.log(`toggle: visible=${win && this.isVisible(win)} sizemode=${win?.windowState} `
       + `active=${Services.focus.activeWindow == win} focused=${win?.document.hasFocus()}`);
@@ -191,7 +340,7 @@ ZoteroTray = {
       this.hideWindow(win);
     }
     else {
-      this.showWindow(win);
+      this.showWindow(win, token);
     }
   },
 
@@ -366,10 +515,10 @@ ZoteroTray = {
           this.kwin = msg.kwin;
           break;
         case "activate":
-          this.toggleWindow();
+          this.toggleWindow(msg.token);
           break;
         case "show":
-          this.showWindow();
+          this.showWindow(undefined, msg.token);
           break;
         case "hide": {
           let win = Zotero.getMainWindow();
