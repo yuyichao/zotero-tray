@@ -74,6 +74,9 @@ window quits Zotero as usual, so you can never end up with an invisible
 Zotero:
 
 - python3, PyGObject or the tray are unavailable → normal close behavior.
+- The helper only reports the tray as ready once the item actually shows up
+  in the watcher's `RegisteredStatusNotifierItems`. Until then it keeps
+  re-registering, and it also re-registers if the watcher drops the item later.
 - The helper dies while the window is hidden → the window is shown again and
   the helper is restarted (up to 5 failures in a row).
 - The tray host disappears while the window is hidden (e.g. plasmashell

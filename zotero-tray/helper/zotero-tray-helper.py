@@ -221,7 +221,10 @@ class Tray:
                        "quit": "Quit Zotero"}
         self.window_visible = True
         self.menu_revision = 1
+        self.name_owned = False
         self.registered = False
+        self.register_timer = 0
+        self.register_attempts = 0
         self.host = False
         self.kwin = False
         self.watcher = None
@@ -239,7 +242,8 @@ class Tray:
         self.bus_name = "org.kde.StatusNotifierItem-%d-1" % os.getpid()
         Gio.bus_own_name_on_connection(bus, self.bus_name,
                                        Gio.BusNameOwnerFlags.NONE,
-                                       None, None)
+                                       self.on_name_acquired,
+                                       self.on_name_lost)
         for name in WATCHER_NAMES:
             Gio.bus_watch_name_on_connection(
                 bus, name, Gio.BusNameWatcherFlags.NONE,
@@ -264,6 +268,40 @@ class Tray:
 
     # --- StatusNotifierWatcher -------------------------------------------
 
+    # The KDE watcher silently ignores items whose bus name is not owned
+    # yet, so only register once both the name and the watcher are there.
+    # Registration is also confirmed against the watcher's item list and
+    # retried, since a successful reply does not mean the item was added.
+    def on_name_acquired(self, bus, name):
+        self.name_owned = True
+        self.register()
+
+    def on_name_lost(self, bus, name):
+        log("lost bus name", name)
+        self.name_owned = False
+        self.registered = False
+        self.report_status()
+
+    def register(self):
+        if self.register_timer:
+            GLib.source_remove(self.register_timer)
+            self.register_timer = 0
+        if not self.name_owned or self.watcher is None:
+            return GLib.SOURCE_REMOVE
+        self.register_attempts += 1
+        self.bus.call(self.watcher, WATCHER_PATH, self.watcher,
+                      "RegisterStatusNotifierItem",
+                      GLib.Variant("(s)", (self.bus_name,)), None,
+                      Gio.DBusCallFlags.NONE, 5000, None, self.on_registered,
+                      self.watcher)
+        return GLib.SOURCE_REMOVE
+
+    def retry_register(self):
+        if self.register_timer:
+            return
+        delay = 1000 if self.register_attempts < 10 else 5000
+        self.register_timer = GLib.timeout_add(delay, self.register)
+
     def on_watcher_appeared(self, bus, name, owner):
         if self.watcher is not None:
             return
@@ -274,9 +312,11 @@ class Tray:
             self.watcher_subs.append(bus.signal_subscribe(
                 owner, iface, sig, WATCHER_PATH, None,
                 Gio.DBusSignalFlags.NONE, self.on_host_changed))
-        bus.call(name, WATCHER_PATH, iface, "RegisterStatusNotifierItem",
-                 GLib.Variant("(s)", (self.bus_name,)), None,
-                 Gio.DBusCallFlags.NONE, 5000, None, self.on_registered, name)
+        self.watcher_subs.append(bus.signal_subscribe(
+            owner, iface, "StatusNotifierItemUnregistered", WATCHER_PATH,
+            None, Gio.DBusSignalFlags.NONE, self.on_item_unregistered))
+        self.register_attempts = 0
+        self.register()
         self.on_host_changed()
 
     def on_watcher_vanished(self, bus, name):
@@ -295,10 +335,41 @@ class Tray:
             bus.call_finish(res)
         except GLib.Error as e:
             log("RegisterStatusNotifierItem failed:", e.message)
+            self.retry_register()
             return
-        if self.watcher == name:
+        if self.watcher != name or not self.name_owned:
+            return
+        bus.call(name, WATCHER_PATH, "org.freedesktop.DBus.Properties", "Get",
+                 GLib.Variant("(ss)", (name, "RegisteredStatusNotifierItems")),
+                 GLib.VariantType("(v)"), Gio.DBusCallFlags.NONE, 5000, None,
+                 self.on_items_reply, name)
+
+    def is_our_item(self, item):
+        return item == self.bus_name or item.startswith(self.bus_name + "/")
+
+    def on_items_reply(self, bus, res, name):
+        try:
+            items = bus.call_finish(res).unpack()[0]
+        except GLib.Error as e:
+            log("RegisteredStatusNotifierItems failed:", e.message)
+            items = None
+        if self.watcher != name or not self.name_owned:
+            return
+        # Some watchers may not implement the property; trust the reply then.
+        if items is None or any(self.is_our_item(i) for i in items):
             self.registered = True
             self.report_status()
+        else:
+            log("watcher did not list the item, registering again")
+            self.retry_register()
+
+    def on_item_unregistered(self, bus, sender, path, iface, signal, params):
+        if not self.is_our_item(params.unpack()[0]):
+            return
+        log("watcher unregistered the item, registering again")
+        self.registered = False
+        self.report_status()
+        self.retry_register()
 
     def on_host_changed(self, *args):
         name = self.watcher
