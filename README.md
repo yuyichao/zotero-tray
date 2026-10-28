@@ -60,14 +60,21 @@ In Zotero: Tools → Plugins → gear menu → Install Plugin From File… →
 
 ### Releases and updates
 
+Every pushed commit and pull request is built by the
+[Build workflow](.github/workflows/build.yml); the `.xpi` is available as a
+workflow artifact on the run.
+
 Zotero checks the plugin's `update_url`, which points at
 [`updates.json`](updates.json) on the `master` branch. To publish version X:
 
-1. Set `"version"` in `zotero-tray/manifest.json` to X and run `./build.sh`.
+1. Set `"version"` in `zotero-tray/manifest.json` to X.
 2. Add an entry for X to `updates.json`, with `update_link` set to
    `https://github.com/yuyichao/zotero-tray/releases/download/vX/zotero-tray.xpi`.
-3. Push, and create a GitHub release with tag `vX` that has the built
-   `zotero-tray.xpi` attached.
+3. Commit, then push `master` and a tag `vX`. The
+   [Release workflow](.github/workflows/release.yml) checks that the tag
+   matches the manifest version and has an `updates.json` entry, builds the
+   plugin, and attaches `zotero-tray.xpi` to the GitHub release for `vX`
+   (creating the release if needed).
 
 ## How it works
 

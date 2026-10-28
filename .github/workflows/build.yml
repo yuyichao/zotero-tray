@@ -1,0 +1,24 @@
+name: Build
+
+# Build the plugin for every pushed commit and pull request and keep the
+# .xpi as a workflow artifact. Tags are handled by release.yml.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build zotero-tray.xpi
+        run: ./build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zotero-tray-${{ github.sha }}
+          path: zotero-tray.xpi
+          if-no-files-found: error

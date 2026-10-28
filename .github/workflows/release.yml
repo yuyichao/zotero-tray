@@ -1,0 +1,41 @@
+name: Release
+
+# For a pushed tag vX: build the plugin and attach zotero-tray.xpi to the
+# GitHub release for that tag (created if it does not exist yet). This is the
+# download that updates.json links to.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag against manifest.json and updates.json
+        run: |
+          python3 - "$GITHUB_REF_NAME" <<'EOF'
+          import json, sys
+          tag = sys.argv[1]
+          version = json.load(open("zotero-tray/manifest.json"))["version"]
+          if tag != "v" + version:
+              sys.exit(f"Tag {tag} does not match manifest.json version {version}")
+          updates = json.load(open("updates.json"))["addons"]["zotero-tray@yyc1992"]["updates"]
+          if not any(u["version"] == version for u in updates):
+              sys.exit(f"updates.json has no entry for version {version}")
+          EOF
+      - name: Build zotero-tray.xpi
+        run: ./build.sh
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" zotero-tray.xpi --clobber
+          else
+            gh release create "$TAG" zotero-tray.xpi --verify-tag --title "$TAG" --generate-notes
+          fi
