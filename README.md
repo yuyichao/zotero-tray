@@ -1,7 +1,7 @@
 # Zotero Tray
 
-A Zotero 7+ plugin that keeps Zotero in the system tray on KDE Plasma, on both
-X11 and Wayland:
+A Zotero 7+ plugin that keeps Zotero in the system tray on Linux, on both X11
+and Wayland:
 
 - A tray icon is shown for as long as Zotero is running. It uses the
   StatusNotifierItem protocol (`org.kde.StatusNotifierItem` plus a
@@ -18,10 +18,25 @@ X11 and Wayland:
   brings it back.
 
 No Zotero files are patched and nothing is preloaded. Only standard extension
-points are used: a bootstrapped Zotero plugin, standard window activation
-(xdg-activation on Wayland, EWMH on X11), and, only as a fallback, a KWin script
-loaded at runtime through KWin's scripting D-Bus API. No KWin settings need to
-change.
+points and protocols are used: a bootstrapped Zotero plugin, the
+StatusNotifierItem tray protocol, and standard window activation
+(xdg-activation on Wayland, EWMH on X11). It should therefore work with any
+desktop whose tray supports StatusNotifierItem, but it has only been tested on
+KDE Plasma with KWin.
+
+### KDE Plasma / KWin specifics
+
+Two KDE-specific mechanisms are used when available, to make bringing the
+window forward more reliable:
+
+- Plasma's tray passes an xdg-activation token for each click through
+  `ProvideXdgActivationToken`, a KDE extension to StatusNotifierItem. Other tray
+  hosts may not; then on Wayland the window is focused with the KWin script
+  below, or, without KWin, Gecko's own focus request, which the compositor may
+  refuse (the window then shows up without focus).
+- On Wayland, when no token arrived and KWin is running, a one-shot KWin script
+  is loaded at runtime through KWin's scripting D-Bus API to activate the
+  window. No KWin settings need to change.
 
 ## Requirements
 
@@ -29,6 +44,10 @@ change.
 - `python3` with PyGObject and the Gio typelib (`python-gobject` on Arch).
   The GdkPixbuf typelib is optional; it provides the bundled PNG icon as a
   fallback when the `zotero` icon is not in the icon theme.
+- A tray that supports StatusNotifierItem, i.e. a StatusNotifierWatcher
+  (`org.kde.StatusNotifierWatcher` or `org.freedesktop.StatusNotifierWatcher`)
+  with a registered host. KDE Plasma has one built in; on other desktops this
+  depends on the panel. Without one, closing the window quits Zotero as usual.
 
 ## Build and install
 
@@ -42,12 +61,13 @@ In Zotero: Tools → Plugins → gear menu → Install Plugin From File… →
 ## How it works
 
 ```
-Zotero process                         tray helper (python3)            Plasma
-┌────────────────────────┐ JSON lines ┌──────────────────────────┐ D-Bus ┌──────────────────┐
+Zotero process                         tray helper (python3)            desktop
+┌────────────────────────┐ JSON lines ┌──────────────────────────┐ D-Bus ┌───────────────────┐
 │ zotero-tray.js         │◄──stdout───│ org.kde.StatusNotifier-  │◄─────►│ system tray       │
 │  close → hide window   │───stdin───►│ Item + dbusmenu          │       │ (SNI host)        │
 │  show/activate/quit    │            │ KWin raise script loader │──────►│ KWin /Scripting   │
-└────────────────────────┘            └──────────────────────────┘       └──────────────────┘
+└────────────────────────┘            └──────────────────────────┘       │ (KWin only)       │
+                                                                          └───────────────────┘
 ```
 
 - `zotero-tray.js` (runs inside Zotero): hides and shows the main window
@@ -66,16 +86,17 @@ Zotero process                         tray helper (python3)            Plasma
   Gecko's own focus request can be refused by focus-stealing prevention. After
   the shown window has painted, the plugin activates it the way a task bar
   would, in this order:
-  1. Wayland with a token: Plasma calls `ProvideXdgActivationToken` on the
-     item right before `Activate` and before a menu click. The helper passes
-     the token along, and the plugin hands it to GTK
+  1. Wayland with a token: a tray host that supports it (Plasma does) calls
+     `ProvideXdgActivationToken` on the item right before `Activate` and
+     before a menu click. The helper passes the token along, and the plugin hands it to GTK
      (`gdk_wayland_display_set_startup_notification_id` + `gdk_window_focus`
      on Gecko's toplevel, via js-ctypes), which calls
      `xdg_activation_v1.activate`.
   2. X11: an EWMH `_NET_ACTIVE_WINDOW` client message with the pager source
      indication, sent for the window's XID.
-  3. Wayland without a token: a one-shot KWin script, loaded through KWin's
-     scripting D-Bus API, activates the window (matched by pid and title).
+  3. Wayland without a token, on KWin: a one-shot KWin script, loaded
+     through KWin's scripting D-Bus API, activates the window (matched by pid
+     and title).
   4. Otherwise Gecko's own `window.focus()`.
 
 ### Fail-safes
@@ -110,6 +131,8 @@ activation fallback (for debugging).
 
 ## Tested
 
+All testing was done on KDE Plasma / KWin.
+
 In a nested, headless KWin 6.8 (Wayland, plus Xwayland for the X11 backend)
 with a stand-in StatusNotifierWatcher, and Zotero 10.0.6 on both
 `MOZ_ENABLE_WAYLAND=1` and `GDK_BACKEND=x11`:
@@ -132,7 +155,8 @@ another window; a left click on the focused window hides it. Middle click was
 not tried. EWMH activation on X11 was only tried under Xwayland in the nested
 KWin, where it brought the window forward with the KWin fallback off.
 
-Not tested: a native KWin X11 session.
+Not tested: a native KWin X11 session, and any desktop other than KDE Plasma
+(other tray hosts, compositors and window managers).
 
 ## Known limitations
 
