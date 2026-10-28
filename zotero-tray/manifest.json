@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Zotero Tray",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Keep Zotero running in the system tray (StatusNotifierItem) when the main window is closed.",
   "homepage_url": "https://github.com/yuyichao/zotero-tray",
   "applications": {
