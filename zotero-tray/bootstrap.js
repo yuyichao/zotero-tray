@@ -4,6 +4,8 @@ var ZoteroTray;
 function install() {}
 
 async function startup({ id, version, rootURI }) {
+  Services.scriptloader.loadSubScript(rootURI + "gdbus.js");
+  Services.scriptloader.loadSubScript(rootURI + "tray-item.js");
   Services.scriptloader.loadSubScript(rootURI + "zotero-tray.js");
   await ZoteroTray.init({ id, version, rootURI });
 }

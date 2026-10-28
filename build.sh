@@ -3,5 +3,5 @@
 set -e
 cd "$(dirname "$0")/zotero-tray"
 rm -f ../zotero-tray.xpi
-python3 -m zipfile -c ../zotero-tray.xpi manifest.json bootstrap.js prefs.js zotero-tray.js helper
+python3 -m zipfile -c ../zotero-tray.xpi manifest.json bootstrap.js prefs.js gdbus.js poll-worker.js tray-item.js zotero-tray.js
 echo "built $(cd .. && pwd)/zotero-tray.xpi"

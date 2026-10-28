@@ -1,6 +1,5 @@
-/* global Zotero, Services, ChromeUtils, PathUtils, IOUtils, Components, setTimeout, clearTimeout */
+/* global Zotero, Services, ChromeUtils, PathUtils, Components, setTimeout, clearTimeout, GDBus, TrayItem */
 var { classes: Cc, interfaces: Ci, manager: Cm } = Components;
-var { Subprocess } = ChromeUtils.importESModule("resource://gre/modules/Subprocess.sys.mjs");
 
 // Top-level declarations use var: Zotero keeps the plugin sandbox across
 // disable/enable, so this file can be loaded into it more than once.
@@ -9,7 +8,10 @@ var PREF_BRANCH = "extensions.zotero-tray.";
 // How long the main window may stay hidden without a tray host before it is
 // brought back (e.g. while plasmashell restarts).
 var HOST_GRACE_MS = 10000;
-var MAX_HELPER_FAILURES = 5;
+var MAX_TRAY_FAILURES = 5;
+
+// resource://zotero-tray/ maps to the plugin's root, for the poll worker.
+var RESOURCE_HOST = "zotero-tray";
 
 var CLH_CID = Components.ID("{1f6c9b1e-6f0e-4b52-9a8b-3e0d6a7c2f41}");
 var CLH_CONTRACT = "@yyc1992/zotero-tray-clh;1";
@@ -18,18 +20,20 @@ var CLH_CATEGORY_ENTRY = "l-zotero-tray";
 
 ZoteroTray = {
   rootURI: null,
-  proc: null,
+  item: null,
   ready: false,
   kwin: false,
   quitting: false,
   shuttingDown: false,
-  helperFailures: 0,
+  trayFailures: 0,
   hostTimer: null,
   windows: new Map(),
   hidden: new WeakSet(),
 
   async init({ rootURI }) {
     this.rootURI = rootURI;
+    this.resProto().setSubstitution(RESOURCE_HOST, Services.io.newURI(rootURI));
+    GDBus.init(`resource://${RESOURCE_HOST}/poll-worker.js`);
     Services.obs.addObserver(this, "quit-application-granted");
     this.registerCommandLineHandler();
     this.wrapActivate();
@@ -38,7 +42,7 @@ ZoteroTray = {
         this.addToWindow(win);
       }
     }
-    await this.startHelper();
+    this.startTray();
   },
 
   shutdown(appShutdown) {
@@ -53,7 +57,12 @@ ZoteroTray = {
       this.unwrapActivate();
       this.unregisterCommandLineHandler();
     }
-    this.stopHelper();
+    this.stopTray();
+    this.resProto().setSubstitution(RESOURCE_HOST, null);
+  },
+
+  resProto() {
+    return Services.io.getProtocolHandler("resource").QueryInterface(Ci.nsIResProtocolHandler);
   },
 
   log(msg) {
@@ -216,8 +225,8 @@ ZoteroTray = {
     }
     if (!how) {
       win.focus();
-      if (this.kwin) {
-        this.send({ cmd: "raise", pid: Services.appinfo.processID, caption: win.document.title });
+      if (this.kwin && this.item) {
+        this.item.raiseWindow(Services.appinfo.processID, win.document.title);
         how = "KWin script";
       }
       else {
@@ -406,130 +415,126 @@ ZoteroTray = {
     }
   },
 
-  // --- Tray helper process ---------------------------------------------
+  // --- Tray icon ---------------------------------------------------------
 
-  async extractHelper() {
-    let text = await Zotero.File.getResourceAsync(this.rootURI + "helper/zotero-tray-helper.py");
-    let path = PathUtils.join(PathUtils.profileDir, "zotero-tray-helper.py");
-    await IOUtils.writeUTF8(path, text);
-    return path;
-  },
-
-  async startHelper() {
-    if (this.shuttingDown || this.proc) return;
-    let proc;
+  async startTray() {
+    if (this.shuttingDown || this.item) return;
+    let item = this.item = new TrayItem(this.trayEvents(), {
+      title: Zotero.appName || "Zotero",
+      iconName: this.pref("iconName"),
+      log: msg => this.log(msg),
+    });
     try {
-      let python = this.pref("python");
-      if (!python.includes("/")) {
-        python = await Subprocess.pathSearch(python);
-      }
-      let script = await this.extractHelper();
-      proc = await Subprocess.call({
-        command: python,
-        arguments: [script],
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-      });
+      await item.start();
     }
     catch (e) {
       Zotero.logError(e);
-      this.log("could not start the tray helper; closing the main window will quit Zotero");
+      this.log("could not show the tray icon; closing the main window will quit Zotero");
+      if (this.item == item) this.onTrayLost(item);
       return;
     }
-    if (this.shuttingDown) {
-      proc.kill();
-      return;
-    }
-    this.proc = proc;
-    this.log("tray helper started");
-    this.readLines(proc.stderr, line => this.log("helper: " + line));
-    this.readLines(proc.stdout, line => this.onHelperMessage(line));
-    this.send({
-      cmd: "config",
-      title: Zotero.appName || "Zotero",
-      iconName: this.pref("iconName"),
-      iconFiles: ["icon128.png", "icon64.png", "icon32.png"].map(
-        name => PathUtils.join(Services.dirsvc.get("GreD", Ci.nsIFile).path, "icons", name)),
-    });
+    if (this.item != item) return;
     this.sendVisible();
-    proc.wait().then(({ exitCode }) => this.onHelperExit(proc, exitCode));
-  },
-
-  stopHelper() {
-    let proc = this.proc;
-    this.proc = null;
-    this.ready = false;
-    if (proc) {
-      // The helper exits on EOF; kill it if it does not.
-      proc.stdin.close().catch(() => {});
-      setTimeout(() => proc.kill(), 2000);
-    }
-  },
-
-  async readLines(pipe, callback) {
-    let buf = "";
+    let pixmaps = [];
     try {
-      for (;;) {
-        let data = await pipe.readString();
-        if (!data) break;
-        buf += data;
-        let lines = buf.split("\n");
-        buf = lines.pop();
-        for (let line of lines) {
-          if (line) callback(line);
+      pixmaps = this.loadPixmaps();
+    }
+    catch (e) {
+      Zotero.logError(e);
+    }
+    if (pixmaps.length) item.setPixmaps(pixmaps);
+  },
+
+  stopTray() {
+    let item = this.item;
+    this.item = null;
+    this.ready = false;
+    item?.stop();
+  },
+
+  // Tray events arrive from GDBus callbacks; run UI actions from a fresh
+  // event loop turn.
+  trayEvents() {
+    let dispatch = (fn) => {
+      let item = this.item;
+      Services.tm.dispatchToMainThread(() => {
+        if (this.item == item) fn();
+      });
+    };
+    return {
+      status: ({ ready, kwin }) => dispatch(() => {
+        this.kwin = kwin;
+        this.setReady(ready);
+      }),
+      activate: token => dispatch(() => this.toggleWindow(token)),
+      show: token => dispatch(() => this.showWindow(undefined, token)),
+      hide: () => dispatch(() => {
+        let win = Zotero.getMainWindow();
+        if (win && this.canHide(win)) this.hideWindow(win);
+      }),
+      quit: () => dispatch(() => this.quit()),
+      closed: () => dispatch(() => this.onTrayLost(this.item)),
+    };
+  },
+
+  // Zotero's bundled icons as ARGB32 pixmaps, for when the icon theme has no
+  // icon named by the iconName pref.
+  loadPixmaps() {
+    let { ctypes } = ChromeUtils.importESModule("resource://gre/modules/ctypes.sys.mjs");
+    let lib = ctypes.open("libgdk_pixbuf-2.0.so.0");
+    let ptr = ctypes.voidptr_t;
+    let int = (name) => lib.declare(name, ctypes.default_abi, ctypes.int, ptr);
+    let fromFile = lib.declare("gdk_pixbuf_new_from_file", ctypes.default_abi, ptr,
+      ctypes.char.ptr, ptr);
+    let getPixels = lib.declare("gdk_pixbuf_get_pixels", ctypes.default_abi, ctypes.uint8_t.ptr, ptr);
+    let [getWidth, getHeight, getRowstride, getNChannels] = ["gdk_pixbuf_get_width",
+      "gdk_pixbuf_get_height", "gdk_pixbuf_get_rowstride", "gdk_pixbuf_get_n_channels"].map(int);
+    let unref = lib.declare("g_object_unref", ctypes.default_abi, ctypes.void_t, ptr);
+    let iconDir = PathUtils.join(Services.dirsvc.get("GreD", Ci.nsIFile).path, "icons");
+    let pixmaps = [];
+    try {
+      for (let name of ["icon128.png", "icon64.png", "icon32.png"]) {
+        let pixbuf = fromFile(PathUtils.join(iconDir, name), null);
+        if (pixbuf.isNull()) {
+          this.log("could not load " + name);
+          continue;
+        }
+        try {
+          let width = getWidth(pixbuf);
+          let height = getHeight(pixbuf);
+          let stride = getRowstride(pixbuf);
+          let channels = getNChannels(pixbuf);
+          let src = ctypes.cast(getPixels(pixbuf),
+            ctypes.uint8_t.array(stride * (height - 1) + width * channels).ptr).contents;
+          // RGB(A) rows to ARGB32 in network byte order
+          let data = new Uint8Array(width * height * 4);
+          for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+              let s = y * stride + x * channels;
+              let d = (y * width + x) * 4;
+              data[d] = channels == 4 ? src[s + 3] : 255;
+              data[d + 1] = src[s];
+              data[d + 2] = src[s + 1];
+              data[d + 3] = src[s + 2];
+            }
+          }
+          pixmaps.push({ width, height, data });
+        }
+        finally {
+          unref(pixbuf);
         }
       }
     }
-    catch (e) {
-      // Pipe closed
+    finally {
+      lib.close();
     }
-  },
-
-  send(msg) {
-    if (!this.proc) return;
-    this.proc.stdin.write(JSON.stringify(msg) + "\n").catch(() => {});
+    return pixmaps;
   },
 
   sendVisible() {
     let win = Zotero.getMainWindow();
     let visible = !!win && this.isVisible(win) && win.windowState != win.STATE_MINIMIZED;
-    this.send({ cmd: "visible", value: visible });
-  },
-
-  onHelperMessage(line) {
-    let msg;
-    try {
-      msg = JSON.parse(line);
-    }
-    catch (e) {
-      this.log("bad helper message: " + line);
-      return;
-    }
-    this.log("helper event: " + line);
-    // Run UI actions from a fresh event loop turn.
-    Services.tm.dispatchToMainThread(() => {
-      switch (msg.event) {
-        case "status":
-          this.setReady(msg.ready);
-          this.kwin = msg.kwin;
-          break;
-        case "activate":
-          this.toggleWindow(msg.token);
-          break;
-        case "show":
-          this.showWindow(undefined, msg.token);
-          break;
-        case "hide": {
-          let win = Zotero.getMainWindow();
-          if (win && this.canHide(win)) this.hideWindow(win);
-          break;
-        }
-        case "quit":
-          this.quit();
-          break;
-      }
-    });
+    this.item?.setVisible(visible);
   },
 
   setReady(ready) {
@@ -537,7 +542,7 @@ ZoteroTray = {
     this.ready = ready;
     clearTimeout(this.hostTimer);
     if (ready) {
-      this.helperFailures = 0;
+      this.trayFailures = 0;
     }
     else {
       this.hostTimer = setTimeout(() => {
@@ -546,19 +551,18 @@ ZoteroTray = {
     }
   },
 
-  onHelperExit(proc, exitCode) {
-    if (this.proc != proc) return;
-    this.proc = null;
+  // The bus connection failed or was lost.
+  onTrayLost(item) {
+    if (!item || this.item != item) return;
     let wasReady = this.ready;
-    this.ready = false;
+    this.stopTray();
     clearTimeout(this.hostTimer);
     if (this.shuttingDown || this.quitting) return;
-    this.log(`tray helper exited with code ${exitCode}`);
     // Never leave the app running with neither a window nor a tray icon.
     this.showHiddenWindows();
-    if (!wasReady) this.helperFailures++;
-    if (this.helperFailures < MAX_HELPER_FAILURES) {
-      setTimeout(() => this.startHelper(), 2000);
+    if (!wasReady) this.trayFailures++;
+    if (this.trayFailures < MAX_TRAY_FAILURES) {
+      setTimeout(() => this.startTray(), 2000);
     }
   },
 };
