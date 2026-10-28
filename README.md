@@ -58,6 +58,17 @@ window forward more reliable:
 In Zotero: Tools → Plugins → gear menu → Install Plugin From File… →
 `zotero-tray.xpi`.
 
+### Releases and updates
+
+Zotero checks the plugin's `update_url`, which points at
+[`updates.json`](updates.json) on the `master` branch. To publish version X:
+
+1. Set `"version"` in `zotero-tray/manifest.json` to X and run `./build.sh`.
+2. Add an entry for X to `updates.json`, with `update_link` set to
+   `https://github.com/yuyichao/zotero-tray/releases/download/vX/zotero-tray.xpi`.
+3. Push, and create a GitHub release with tag `vX` that has the built
+   `zotero-tray.xpi` attached.
+
 ## How it works
 
 ```

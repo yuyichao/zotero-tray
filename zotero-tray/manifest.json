@@ -3,10 +3,11 @@
   "name": "Zotero Tray",
   "version": "1.0.0",
   "description": "Keep Zotero running in the system tray (StatusNotifierItem) when the main window is closed.",
+  "homepage_url": "https://github.com/yuyichao/zotero-tray",
   "applications": {
     "zotero": {
       "id": "zotero-tray@yyc1992",
-      "update_url": "https://localhost/zotero-tray/updates.json",
+      "update_url": "https://raw.githubusercontent.com/yuyichao/zotero-tray/master/updates.json",
       "strict_min_version": "7.0",
       "strict_max_version": "10.*"
     }

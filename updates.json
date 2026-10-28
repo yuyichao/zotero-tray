@@ -1,0 +1,18 @@
+{
+  "addons": {
+    "zotero-tray@yyc1992": {
+      "updates": [
+        {
+          "version": "1.0.0",
+          "update_link": "https://github.com/yuyichao/zotero-tray/releases/download/v1.0.0/zotero-tray.xpi",
+          "applications": {
+            "zotero": {
+              "strict_min_version": "7.0",
+              "strict_max_version": "10.*"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
